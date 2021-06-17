@@ -1,22 +1,20 @@
 import torch
 import torch.nn as nn
-import numpy as np
 from constants import dtype
-# from spherical_jn import SphericalJN, SphericalJND
 
 
 class AdSBHNet(nn.Module):
     def __init__(self, N=5):
         super(AdSBHNet, self).__init__()
-        self.a = nn.Parameter(torch.normal(0.0, 0.5, size=(N,), dtype=dtype))
-        self.b = nn.Parameter(torch.normal(0.0, 0.5, size=(N,), dtype=dtype))
+        self.a = nn.Parameter(torch.normal(0.0, 0.5, size=(N,), dtype=dreal))
+        self.b = nn.Parameter(torch.normal(0.0, 0.5, size=(N,), dtype=dreal))
 
     def forward(self, Ls):
         '''
         Initial version with torch.trapz
         instead of torchdiffeq.
         '''
-        V = torch.zeros_like(Ls, dtype=dtype)
+        V = torch.zeros_like(Ls, dtype=dcomplex)
         zs_prev = 0.0009
         L_prev = self.integrate_L(zs_prev)
         '''

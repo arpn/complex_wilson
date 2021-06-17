@@ -1,3 +1,4 @@
 import torch
 
-dtype = torch.double
+dreal = torch.double
+dcomplex = torch.cdouble
