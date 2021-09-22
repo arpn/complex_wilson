@@ -8,25 +8,35 @@ from constants import dreal, dcomplex
 
 
 class AdSBHDataset(Dataset):
-    def __init__(self, N=1000, threshold=0.01):
-        self.size = N
-        self.threshold = threshold
-        self.L, self.zs, self.V = self.gen_data()
+    def __init__(self, N=1000, threshold=0.01, coef=1.0, file=None):
+        '''
+        L, V, and sigma is understood to correspond to the
+        dimensionless combinations T*L, V/T, and sigma/T.
+        '''
+        if file:
+            data = np.loadtxt(file)
+            self.L = torch.tensor(data[0], dtype=dreal)
+            self.V = torch.tensor(data[1] + 1j * data[3], dtype=dcomplex)
+            self.sigma = torch.tensor(data[2] + 1j * data[4], dtype=dcomplex)
+            self.zs, self.coef = None, None
+        else:
+            self.coef = coef
+            self.L, self.zs, self.V, self.sigma = self.gen_data(N, threshold)
 
     def __getitem__(self, index):
-        return self.L[index], self.V[index]
+        return self.L[index], self.V[index], self.sigma[index]
 
     def __len__(self):
         return len(self.L)
 
-    def gen_data(self):
-        N = self.size
+    def gen_data(self, N, threshold):
         zs_max, L_max = self.get_L_max()
         L_data = []
         zs_data = []
         V_data = []
+        sigma_data = []
         for _ in range(N):
-            L = npr.uniform(0.01, 2)
+            L = npr.uniform(0.01, 2 / np.pi)
             if L <= L_max:
                 # Binary search
                 zs = self.find_zs_binary(L, zs_max)
@@ -34,14 +44,16 @@ class AdSBHDataset(Dataset):
                 # Newton's method
                 # TODO: Add a smarter init for Newton
                 zs = self.find_zs_newton(L, zs_max + 0.1j)
-            V = self.integrate_V(zs) + npr.uniform(-self.threshold, self.threshold)
+            V = self.integrate_V(zs) + npr.uniform(-threshold, threshold)
             L_data.append(L)
             zs_data.append(zs)
             V_data.append(V)
+            sigma_data.append(npr.uniform(0.1, 0.2) * (1 + 1j))
         L_data = torch.tensor(L_data, dtype=dreal)
         zs_data = torch.tensor(zs_data, dtype=dcomplex)
         V_data = torch.tensor(V_data, dtype=dcomplex)
-        return L_data, zs_data, V_data
+        sigma_data = torch.tensor(sigma_data, dtype=dcomplex)
+        return L_data, zs_data, V_data, sigma_data
 
     def find_zs_binary(self, L, zs_max):
         '''
@@ -112,12 +124,13 @@ class AdSBHDataset(Dataset):
         def integrand_imag(y):
             return imag(integrand(y))
 
-        L = 4 * zs * (quad(integrand_real, 0, 1)[0] + 1j * quad(integrand_imag, 0, 1)[0])
+        L = 4 * zs * (quad(integrand_real, 0, 1)
+                      [0] + 1j * quad(integrand_imag, 0, 1)[0]) / np.pi
         return L
 
     def integrate_dL(self, zs):
         def integrand(y):
-            # NOTE: This only holds for AdS
+            # NOTE: This only holds for AdS-BH
             return 4 * (1 - y)**2 * (1 + y)**2 * (1 - 3 * zs**4 + (1 - y)**4 * (1 + y)**4 * zs**4 * (1 + zs**4)) / \
                 (np.sqrt((1 - zs) * (1 + zs) * (1 + zs**2)) * np.sqrt(4 - 6 * y**2 + 4 * y**4 - y**6) *
                     (1 - (1 - y)**4 * (1 + y)**4 * zs**4)**1.5)
@@ -128,15 +141,16 @@ class AdSBHDataset(Dataset):
         def integrand_imag(y):
             return imag(integrand(y))
 
-        dL = quad(integrand_real, 0, 1)[0] + 1j * quad(integrand_imag, 0, 1)[0]
+        dL = quad(integrand_real, 0, 1)[0] + 1j * \
+            quad(integrand_imag, 0, 1)[0] / np.pi
         return dL
 
     def integrate_V(self, zs):
         def integrand(y):
             z = zs * (1 - y) * (1 + y)
             return np.sqrt(self.eval_f(z) * self.eval_g(z)) / ((1 - y)**2 * (1 + y)**2) * y * (
-                1 / np.sqrt(1 - ((1 - y)**4 * (1 + y)**4 * self.eval_f(zs)) / self.eval_f(z))
-                - 1)
+                1 / np.sqrt(1 - ((1 - y)**4 * (1 + y)**4 *
+                                 self.eval_f(zs)) / self.eval_f(z)) - 1)
 
         def integrand_real(y):
             return real(integrand(y))
@@ -157,6 +171,10 @@ class AdSBHDataset(Dataset):
         def disconnected_imag(y):
             return imag(disconnected(y))
 
-        V = 4 / zs * (quad(integrand_real, 0, 1)[0] + 1j * quad(integrand_imag, 0, 1)[0])
-        V -= 2 * (1 - zs) * (quad(disconnected_real, 0, 1)[0] + 1j * quad(disconnected_imag, 0, 1)[0])
+        V = self.coef * np.pi * 4 / zs * \
+            (quad(integrand_real, 0, 1)[0] +
+             1j * quad(integrand_imag, 0, 1)[0])
+        V -= self.coef * np.pi * 2 * \
+            (1 - zs) * (quad(disconnected_real, 0, 1)
+                        [0] + 1j * quad(disconnected_imag, 0, 1)[0])
         return V

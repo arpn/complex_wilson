@@ -11,6 +11,16 @@ class AdSBHNet(nn.Module):
         super(AdSBHNet, self).__init__()
         self.a = nn.Parameter(torch.normal(0.0, std, size=(N,), dtype=dreal))
         self.b = nn.Parameter(torch.normal(0.0, std, size=(N,), dtype=dreal))
+        '''
+        `self.logcoef` is the log of the dimensionless parameter
+        R^2/(2*pi*alpha') which multiplies the static potential V.
+        '''
+        self.logcoef = nn.Parameter(torch.normal(0.0, std, size=(1,), dtype=dreal)[0])
+        '''
+        The lattice data is supposed to be shifted such that it behaves
+        correctly in the UV. `self.shift` holds that parameter.
+        '''
+        self.shift = nn.Parameter(torch.tensor(0.0, dtype=dreal))
         self.curve_L = []
         self.curvs_zs = []
 
@@ -30,9 +40,7 @@ class AdSBHNet(nn.Module):
             _zs = self.find_zs_newton(L, init)
             # TODO: Verify that flipping possibly negative imaginary parts is always safe
             zs = torch.complex(_zs.real, _zs.imag.abs())
-            if zs.real < 0:
-                logging.error(f'Real part of zs is negative: {zs} for L = {L}')
-                assert False, 'Real part of zs is negative.'
+            assert zs.real > 0, f'Real part of zs is negative: {zs} for L = {L}'
             V[i] = self.integrate_V(zs)
             assert not torch.isnan(V[i])
         return V
@@ -42,24 +50,28 @@ class AdSBHNet(nn.Module):
         self.curve_L = [0.0, L_max.item()]
         self.curve_zs = [complex(0.0, 0.0), zs_max.item()]
 
-        for L in np.linspace(L_max.item() + 0.01, 2, 50):
+        L_step_default = (1 - L_max.item()) / 50
+        L_step = L_step_default
+        while True:
+            L = self.curve_L[-1] + L_step
             if np.abs(self.curve_zs[-1].imag) < 1e-8:
                 init = self.curve_zs[-1] + 0.1j
             else:
                 init = self.curve_zs[-1]
             _zs = self.find_zs_newton(L, init)
             zs = complex(_zs.real.item(), _zs.imag.abs().item() if L > L_max else 0.0)
-            self.curve_zs.append(zs)
-            self.curve_L.append(L)
-        for i in range(2, len(self.curve_zs)):
-            diff = np.abs(self.curve_zs[i] - self.curve_zs[i - 1])
-            if diff > 0.1:
-                logging.error(f'Generated (L, zs) -curve looks discontinuous: |z[i] - z[i-1]| = {diff}')
-                assert False, '(zs, L) -curve is discontinuous.'
+            if np.abs(zs - self.curve_zs[-1]) > 0.1:
+                L_step /= 2
+            else:
+                self.curve_zs.append(zs)
+                self.curve_L.append(L)
+                L_step = L_step_default
+            if self.curve_L[-1] > 1:
+                break
 
     def find_zs_newton(self, L, init, max_steps=25, retry=True):
         if not isinstance(init, torch.Tensor) or init.dtype != dcomplex:
-            zs = torch.as_tensor(init, dtype=dcomplex)
+            init = torch.as_tensor(init, dtype=dcomplex)
         zs = [init]
         _L = self.integrate_L(zs[-1])
         for i in range(max_steps):
@@ -101,6 +113,10 @@ class AdSBHNet(nn.Module):
         return torch.tensor(zs_mid, dtype=dcomplex), L_max.real
 
     def integrate_L(self, zs):
+        '''
+        This computes the dimensionless combination T*L,
+        where T = 1/(pi*z_h).
+        '''
         zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
             zs, dtype=dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
@@ -118,14 +134,14 @@ class AdSBHNet(nn.Module):
         y = torch.cat((y, torch.tensor([1.0], dtype=dreal)))
         integrand = torch.cat((integrand, torch.tensor([0.0], dtype=dcomplex)))
         # Integrate
-        L = 4 * zs * torch.trapz(integrand, y)
-        if torch.isnan(L):
-            logging.error(f'integrate_L({zs}) = {L} for a = {self.a} b = {self.b}')
-            logging.error(f'integrand is {integrand}')
-            assert False, 'L-integrand is nan.'
+        L = 4 * zs * torch.trapz(integrand, y) / np.pi
+        assert not torch.isnan(L), f'integrate_L({zs}) = {L} for a = {self.a} b = {self.b}'
         return L
 
     def integrate_dL(self, zs):
+        '''
+        This computes the derivative of T*L w.r.t. z_*/z_h.
+        '''
         zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
             zs, dtype=dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
@@ -151,11 +167,8 @@ class AdSBHNet(nn.Module):
         y = torch.cat((y, torch.tensor([1.0], dtype=dreal)))
         integrand = torch.cat((integrand, torch.tensor([0.0], dtype=dcomplex)))
         # Integrate
-        dL = torch.trapz(integrand, y)
-        if torch.isnan(dL):
-            logging.error(f'integrate_dL({zs}) = {dL} for a = {self.a} b = {self.b}')
-            logging.error(f'integrand is {integrand}')
-            assert False, 'dL-integrand is nan.'
+        dL = torch.trapz(integrand, y) / np.pi
+        assert not torch.isnan(dL), f'integrate_dL({zs}) = {dL} for a = {self.a} b = {self.b}'
         return dL
 
     def integrate_V(self, zs):
@@ -165,6 +178,10 @@ class AdSBHNet(nn.Module):
         return V_c - V_d
 
     def integrate_V_connected(self, zs):
+        '''
+        This computes the connected contribution of V/T,
+        where T = 1/(pi*z_h).
+        '''
         zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
             zs, dtype=dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
@@ -182,14 +199,16 @@ class AdSBHNet(nn.Module):
         y = torch.cat((y, torch.tensor([1.0], dtype=dreal)))
         integrand = torch.cat((integrand, torch.tensor([0.0], dtype=dcomplex)))
         # Integrate
-        V = 4 * torch.trapz(integrand, y) / zs
-        if torch.isnan(V):
-            logging.error(f'integrate_V_connected({zs}) = {V} for a = {self.a} b = {self.b}')
-            logging.error(f'integrand is {integrand}')
-            assert False, 'Vc-integrand is nan.'
+        coef = self.logcoef.exp()
+        V = coef * np.pi * 4 * torch.trapz(integrand, y) / zs
+        assert not torch.isnan(V), f'integrate_V_connected({zs}) = {V} for a = {self.a} b = {self.b}'
         return V
 
     def integrate_V_disconnected(self, zs):
+        '''
+        This computes the disconnected contribution of V/T,
+        where T = 1/(pi*z_h).
+        '''
         # Coordinate is y = (1 - z) / (1 - zs)
         y = torch.linspace(0.001, 1, steps=1000, dtype=dreal)
         z = 1 - (1 - zs) * y
@@ -198,11 +217,9 @@ class AdSBHNet(nn.Module):
         # NOTE: This assumes that f(z)*g(z)->1 when z->1
         y = torch.cat((torch.tensor([0.0], dtype=dreal), y))
         integrand = torch.cat((torch.tensor([1.0], dtype=dreal), integrand))
-        V = 2 * (1 - zs) * torch.trapz(integrand, y)
-        if torch.isnan(V):
-            logging.error(f'integrate_V_disconnected({zs}) = {V} for a = {self.a} b = {self.b}')
-            logging.error(f'integrand is {integrand}')
-            assert False, 'Vd-integrand is nan.'
+        coef = self.logcoef.exp()
+        V = coef * np.pi * 2 * (1 - zs) * torch.trapz(integrand, y)
+        assert not torch.isnan(V), f'integrate_V_disconnected({zs}) = {V} for a = {self.a} b = {self.b}'
         return V
 
     def eval_a(self, z):
