@@ -171,10 +171,7 @@ class AdSBHDataset(Dataset):
         def disconnected_imag(y):
             return imag(disconnected(y))
 
-        V = self.coef * np.pi * 4 / zs * \
-            (quad(integrand_real, 0, 1)[0] +
-             1j * quad(integrand_imag, 0, 1)[0])
-        V -= self.coef * np.pi * 2 * \
-            (1 - zs) * (quad(disconnected_real, 0, 1)
-                        [0] + 1j * quad(disconnected_imag, 0, 1)[0])
+        V = 4 / zs * (quad(integrand_real, 0, 1)[0] + 1j * quad(integrand_imag, 0, 1)[0])
+        V -= 2 * (1 - zs) * (quad(disconnected_real, 0, 1)[0] + 1j * quad(disconnected_imag, 0, 1)[0])
+        V *= self.coef * np.pi
         return V
