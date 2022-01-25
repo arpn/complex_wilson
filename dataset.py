@@ -124,8 +124,7 @@ class AdSBHDataset(Dataset):
         def integrand_imag(y):
             return imag(integrand(y))
 
-        L = 4 * zs * (quad(integrand_real, 0, 1)
-                      [0] + 1j * quad(integrand_imag, 0, 1)[0]) / np.pi
+        L = 4 * zs * (quad(integrand_real, 0, 1)[0] + 1j * quad(integrand_imag, 0, 1)[0]) / np.pi
         return L
 
     def integrate_dL(self, zs):
@@ -141,8 +140,7 @@ class AdSBHDataset(Dataset):
         def integrand_imag(y):
             return imag(integrand(y))
 
-        dL = quad(integrand_real, 0, 1)[0] + 1j * \
-            quad(integrand_imag, 0, 1)[0] / np.pi
+        dL = (quad(integrand_real, 0, 1)[0] + 1j * quad(integrand_imag, 0, 1)[0]) / np.pi
         return dL
 
     def integrate_V(self, zs):

@@ -2,6 +2,7 @@ import logging
 import torch
 import torch.nn as nn
 import numpy as np
+from numpy.random import random
 from scipy.interpolate import interp1d
 from constants import dreal, dcomplex
 
@@ -70,7 +71,7 @@ class AdSBHNet(nn.Module):
             if self.curve_L[-1] > L_high:
                 break
 
-    def find_zs_newton(self, L, init, max_steps=25, retry=True):
+    def find_zs_newton(self, L, init, max_steps=25, retry=10):
         if not isinstance(init, torch.Tensor) or init.dtype != dcomplex:
             init = torch.as_tensor(init, dtype=dcomplex)
         zs = [init]
@@ -83,10 +84,11 @@ class AdSBHNet(nn.Module):
             diff = torch.abs(_L - L)
             if diff < 1e-8:
                 return zs[-1]
-        if retry:
-            logging.warning(f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}. Retrying with default init 0.5+0.5j.')
-            return self.find_zs_newton(L, 0.5 + 0.5j, retry=False)
-        assert not retry, f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}.'
+        if retry > 0:
+            rand_init = init + (0.2 * random() - 0.1) + 1.j * (0.2 * random() - 0.1)
+            logging.warning(f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}. Retrying with random init {rand_init:.5f}.')
+            return self.find_zs_newton(L, rand_init, retry=retry - 1)
+        assert retry > 0, f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}.'
 
     def get_L_max(self):
         '''
