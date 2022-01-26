@@ -17,7 +17,6 @@ class AdSBHNet(nn.Module):
         R^2/(2*pi*alpha') which multiplies the static potential V.
         '''
         self.logcoef = nn.Parameter(torch.normal(0.0, std, size=(1,), dtype=dreal)[0])
-        self.epsilon = 1e-3
         '''
         The lattice data is supposed to be shifted such that it behaves
         correctly in the UV. `self.shift` holds that parameter.
@@ -26,6 +25,23 @@ class AdSBHNet(nn.Module):
         self.curve_L = []
         self.curvs_zs = []
 
+    def check_positive_a(self):
+        '''
+        Checks that the function a(z) defined by self.a
+        is positive in the range [0, 1]. We'll do this in
+        an inelegant way because a(z) can be a high order
+        polynomial where we don't know the minima analytically.
+        '''
+        with torch.no_grad():
+            z_grid = torch.linspace(0, 0.999, steps=1000)
+            _a = torch.cat((torch.tensor([1.0], dtype=dreal), self.a))
+            a_grid = torch.zeros_like(z_grid)
+            for i, ci in enumerate(_a):
+                a_grid += ci * z_grid**i
+            assert torch.all(a_grid > 0), "a(z) is not positive."
+
+        pass
+
     def forward(self, Ls):
         '''
         Initial version with torch.trapz
@@ -33,9 +49,9 @@ class AdSBHNet(nn.Module):
         '''
         V = torch.zeros_like(Ls, dtype=dcomplex)
 
+        self.check_positive_a()
         self.find_curve(Ls.max().item())
         curve = interp1d(self.curve_L, self.curve_zs)
-        zs_max, L_max = self.get_L_max()
 
         for i, L in enumerate(Ls):
             init = complex(curve(L.item()))
@@ -60,7 +76,7 @@ class AdSBHNet(nn.Module):
                 init = self.curve_zs[-1] + 0.1j
             else:
                 init = self.curve_zs[-1]
-            _zs = self.find_zs_newton(L, init)
+            _zs = self.find_zs_newton(L, init, max_steps=50)
             zs = complex(_zs.real.item(), _zs.imag.abs().item() if L > L_max else 0.0)
             if np.abs(zs - self.curve_zs[-1]) > 0.1:
                 L_step /= 2
@@ -224,26 +240,20 @@ class AdSBHNet(nn.Module):
         out = torch.zeros_like(z)
         _a = torch.cat((torch.tensor([1.0], dtype=dreal), self.a))
         for i, ci in enumerate(_a):
-            for j, cj in enumerate(_a):
-                if i + j == 4:
-                    out += -4 * ci * cj * z**4 * torch.log(z)
-                else:
-                    out += 4 * ci * cj * (z**4 - z**(i + j)) / (i + j - 4)
-        out += 4 * self.epsilon * z**4 * (1 - z) * torch.sum(self.a**2)
+            if i == 4:
+                out += -4 * ci * z**4 * torch.log(z)
+            else:
+                out += 4 * ci * (z**4 - z**i) / (i - 4)
         return out
 
     def eval_df(self, z):
         out = torch.zeros_like(z)
         _a = torch.cat((torch.tensor([1.0], dtype=dreal), self.a))
         for i, ci in enumerate(_a):
-            for j, cj in enumerate(_a):
-                out -= 4 * ci * cj * z**(i + j)
+            out += -4 * ci * z**i
         out += 4 * self.eval_f(z)
         out /= z
-        out -= 4 * self.epsilon * torch.sum(self.a**2) * z**4
         # TODO: add z->0 limit exactly
-        # This limit is to linear order:
-        # df = 8*a[0]/3 + (4*a[0]**2+8*a[1])*z
         return out
 
     def eval_b(self, z):
@@ -251,24 +261,19 @@ class AdSBHNet(nn.Module):
         out = torch.zeros_like(z)
         _b = torch.cat((torch.tensor([1.0], dtype=dreal),
                         self.b,
-                        self.a.sum().unsqueeze(-1) + self.epsilon * torch.sum(self.a**2) - self.b.sum()))
+                        self.a.sum().unsqueeze(-1) - self.b.sum()))
         for i, ci in enumerate(_b):
-            for j, cj in enumerate(_b):
-                out += ci * cj * z**(i + j)
+            out += ci * z**i
         return out
 
     def eval_db(self, z):
         z = z if isinstance(z, torch.Tensor) else torch.as_tensor(z)
-        x = torch.zeros_like(z)
-        dx = torch.zeros_like(z)
+        out = torch.zeros_like(z)
         _b = torch.cat((torch.tensor([1.0], dtype=dreal),
                         self.b,
-                        self.a.sum().unsqueeze(-1) + self.epsilon * torch.sum(self.a**2) - self.b.sum()))
-        for i, ci in enumerate(_b):
-            x += ci * z**i
+                        self.a.sum().unsqueeze(-1) - self.b.sum()))
         for i, ci in enumerate(_b[1:]):
-            dx += (i + 1) * ci * z**i
-        out = 2 * dx * x
+            out += i * ci * z**(i - 1)
         return out
 
     def eval_g(self, z):
