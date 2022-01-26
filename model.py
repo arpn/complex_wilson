@@ -179,7 +179,6 @@ class AdSBHNet(nn.Module):
         # Integrate
         dL = torch.trapz(integrand, y) / np.pi
         assert not torch.isnan(dL), f'integrate_dL({zs}) = {dL} for a = {self.a} b = {self.b}'
-        self.dL_int = integrand
         return dL
 
     def integrate_V(self, zs):
