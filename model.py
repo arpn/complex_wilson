@@ -16,7 +16,7 @@ class AdSBHNet(nn.Module):
         `self.logcoef` is the log of the dimensionless parameter
         R^2/(2*pi*alpha') which multiplies the static potential V.
         '''
-        self.logcoef = nn.Parameter(torch.normal(0.0, std, size=(1,), dtype=dreal)[0])
+        self.logcoef = nn.Parameter(torch.tensor(0.0, dtype=dreal))
         '''
         The lattice data is supposed to be shifted such that it behaves
         correctly in the UV. `self.shift` holds that parameter.
@@ -40,7 +40,19 @@ class AdSBHNet(nn.Module):
                 a_grid += ci * z_grid**i
             assert torch.all(a_grid > 0), "a(z) is not positive."
 
-        pass
+    def check_positive_b(self):
+        '''
+        Same for b(z).
+        '''
+        with torch.no_grad():
+            z_grid = torch.linspace(0, 0.999, steps=1000)
+            _b = torch.cat((torch.tensor([1.0], dtype=dreal),
+                            self.b,
+                            self.a.sum().unsqueeze(-1) - self.b.sum()))
+            b_grid = torch.zeros_like(z_grid)
+            for i, ci in enumerate(_b):
+                b_grid += ci * z_grid**i
+            assert torch.all(b_grid > 0), "b(z) is not positive."
 
     def forward(self, Ls):
         '''
@@ -50,6 +62,7 @@ class AdSBHNet(nn.Module):
         V = torch.zeros_like(Ls, dtype=dcomplex)
 
         self.check_positive_a()
+        self.check_positive_b()
         self.find_curve(Ls.max().item())
         curve = interp1d(self.curve_L, self.curve_zs)
 
@@ -76,7 +89,7 @@ class AdSBHNet(nn.Module):
                 init = self.curve_zs[-1] + 0.1j
             else:
                 init = self.curve_zs[-1]
-            _zs = self.find_zs_newton(L, init, max_steps=50)
+            _zs = self.find_zs_newton(L, init)
             zs = complex(_zs.real.item(), _zs.imag.abs().item() if L > L_max else 0.0)
             if np.abs(zs - self.curve_zs[-1]) > 0.1:
                 L_step /= 2
@@ -87,7 +100,7 @@ class AdSBHNet(nn.Module):
             if self.curve_L[-1] > L_high:
                 break
 
-    def find_zs_newton(self, L, init, max_steps=25, retry=10):
+    def find_zs_newton(self, L, init, max_steps=50, retry=10):
         if not isinstance(init, torch.Tensor) or init.dtype != dcomplex:
             init = torch.as_tensor(init, dtype=dcomplex)
         zs = [init]
@@ -212,7 +225,6 @@ class AdSBHNet(nn.Module):
         coef = self.logcoef.exp()
         V = coef * np.pi * 4 * torch.trapz(integrand, y) / zs
         assert not torch.isnan(V), f'integrate_V_connected({zs}) = {V} for a = {self.a} b = {self.b}'
-        self.Vc_int = integrand
         return V
 
     def integrate_V_disconnected(self, zs):
@@ -231,7 +243,6 @@ class AdSBHNet(nn.Module):
         coef = self.logcoef.exp()
         V = coef * np.pi * 2 * (1 - zs) * torch.trapz(integrand, y)
         assert not torch.isnan(V), f'integrate_V_disconnected({zs}) = {V} for a = {self.a} b = {self.b}'
-        self.Vd_int = integrand
         return V
 
     def eval_f(self, z):
@@ -268,11 +279,10 @@ class AdSBHNet(nn.Module):
     def eval_db(self, z):
         z = z if isinstance(z, torch.Tensor) else torch.as_tensor(z)
         out = torch.zeros_like(z)
-        _b = torch.cat((torch.tensor([1.0], dtype=dreal),
-                        self.b,
+        _b = torch.cat((self.b,
                         self.a.sum().unsqueeze(-1) - self.b.sum()))
-        for i, ci in enumerate(_b[1:]):
-            out += i * ci * z**(i - 1)
+        for i, ci in enumerate(_b):
+            out += (i + 1) * ci * z**i
         return out
 
     def eval_g(self, z):
