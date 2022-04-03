@@ -8,7 +8,7 @@ from constants import dreal, dcomplex
 
 
 class AdSBHNet(nn.Module):
-    def __init__(self, N=5, std=1.0):
+    def __init__(self, N=1, std=1.0):
         super(AdSBHNet, self).__init__()
         self.a = nn.Parameter(torch.normal(0.0, std, size=(N,), dtype=dreal))
         self.b = nn.Parameter(torch.normal(0.0, std, size=(N,), dtype=dreal))
@@ -34,7 +34,9 @@ class AdSBHNet(nn.Module):
         '''
         with torch.no_grad():
             z_grid = torch.linspace(0, 0.999, steps=1000)
-            _a = torch.cat((torch.tensor([1.0], dtype=dreal), self.a))
+            _a = torch.cat((torch.tensor([1.0], dtype=dreal),
+                            torch.zeros(3, dtype=dreal),
+                            self.a))
             a_grid = torch.zeros_like(z_grid)
             for i, ci in enumerate(_a):
                 a_grid += ci * z_grid**i
@@ -47,8 +49,8 @@ class AdSBHNet(nn.Module):
         with torch.no_grad():
             z_grid = torch.linspace(0, 0.999, steps=1000)
             _b = torch.cat((torch.tensor([1.0], dtype=dreal),
-                            self.b,
-                            self.a.sum().unsqueeze(-1) - self.b.sum()))
+                            torch.zeros(3, dtype=dreal),
+                            self.b))
             b_grid = torch.zeros_like(z_grid)
             for i, ci in enumerate(_b):
                 b_grid += ci * z_grid**i
@@ -115,8 +117,12 @@ class AdSBHNet(nn.Module):
                 return zs[-1]
         if retry > 0:
             rand_init = init + (0.2 * random() - 0.1) + 1.j * (0.2 * random() - 0.1)
+            # Im(rand_init) should be positive
+            rand_init = rand_init.real + 1j * rand_init.imag.abs()
             logging.warning(f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}. Retrying with random init {rand_init:.5f}.')
             return self.find_zs_newton(L, rand_init, retry=retry - 1)
+        # Save the last complex path for debugging
+        self.newton_zs = zs
         assert retry > 0, f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}.'
 
     def get_L_max(self):
@@ -146,8 +152,7 @@ class AdSBHNet(nn.Module):
         This computes the dimensionless combination T*L,
         where T = 1/(pi*z_h).
         '''
-        zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
-            zs, dtype=dcomplex)
+        zs = torch.as_tensor(zs, dtype=dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         sqrtg = self.eval_g(z).sqrt()
@@ -162,7 +167,7 @@ class AdSBHNet(nn.Module):
         y = torch.cat((y, torch.tensor([1.0], dtype=dreal)))
         integrand = torch.cat((integrand, torch.tensor([0.0], dtype=dcomplex)))
         # Integrate
-        L = 4 * zs * torch.trapz(integrand, y) / np.pi
+        L = 4 * zs * torch.trapz(integrand, y) / np.pi * torch.sqrt((1 + self.a.sum()) / (1 + self.b.sum()))
         assert not torch.isnan(L), f'integrate_L({zs}) = {L} for a = {self.a} b = {self.b}'
         return L
 
@@ -170,8 +175,7 @@ class AdSBHNet(nn.Module):
         '''
         This computes the derivative of T*L w.r.t. z_*/z_h.
         '''
-        zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
-            zs, dtype=dcomplex)
+        zs = torch.as_tensor(zs, dtype=dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         fs = self.eval_f(zs)
@@ -190,7 +194,7 @@ class AdSBHNet(nn.Module):
         y = torch.cat((y, torch.tensor([1.0], dtype=dreal)))
         integrand = torch.cat((integrand, torch.tensor([0.0], dtype=dcomplex)))
         # Integrate
-        dL = torch.trapz(integrand, y) / np.pi
+        dL = torch.trapz(integrand, y) / np.pi * torch.sqrt((1 + self.a.sum()) / (1 + self.b.sum()))
         assert not torch.isnan(dL), f'integrate_dL({zs}) = {dL} for a = {self.a} b = {self.b}'
         return dL
 
@@ -205,8 +209,7 @@ class AdSBHNet(nn.Module):
         This computes the connected contribution of V/T,
         where T = 1/(pi*z_h).
         '''
-        zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
-            zs, dtype=dcomplex)
+        zs = torch.as_tensor(zs, dtype=dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         f = self.eval_f(z)
@@ -223,7 +226,7 @@ class AdSBHNet(nn.Module):
         integrand = torch.cat((integrand, torch.tensor([0.0], dtype=dcomplex)))
         # Integrate
         coef = self.logcoef.exp()
-        V = coef * np.pi * 4 * torch.trapz(integrand, y) / zs
+        V = coef * np.pi * 4 * torch.trapz(integrand, y) / zs * torch.sqrt((1 + self.b.sum()) / (1 + self.a.sum()))
         assert not torch.isnan(V), f'integrate_V_connected({zs}) = {V} for a = {self.a} b = {self.b}'
         return V
 
@@ -232,6 +235,7 @@ class AdSBHNet(nn.Module):
         This computes the disconnected contribution of V/T,
         where T = 1/(pi*z_h).
         '''
+        zs = torch.as_tensor(zs, dtype=dcomplex)
         # Coordinate is y = (1 - z) / (1 - zs)
         y = torch.linspace(0.001, 1, steps=1000, dtype=dreal)
         z = 1 - (1 - zs) * y
@@ -241,14 +245,16 @@ class AdSBHNet(nn.Module):
         y = torch.cat((torch.tensor([0.0], dtype=dreal), y))
         integrand = torch.cat((torch.tensor([1.0], dtype=dreal), integrand))
         coef = self.logcoef.exp()
-        V = coef * np.pi * 2 * (1 - zs) * torch.trapz(integrand, y)
+        V = coef * np.pi * 2 * (1 - zs) * torch.trapz(integrand, y) * torch.sqrt((1 + self.b.sum()) / (1 + self.a.sum()))
         assert not torch.isnan(V), f'integrate_V_disconnected({zs}) = {V} for a = {self.a} b = {self.b}'
         return V
 
     def eval_f(self, z):
-        z = z if isinstance(z, torch.Tensor) else torch.as_tensor(z)
+        z = torch.as_tensor(z, dtype=dcomplex)
         out = torch.zeros_like(z)
-        _a = torch.cat((torch.tensor([1.0], dtype=dreal), self.a))
+        _a = torch.cat((torch.tensor([1.0], dtype=dreal),
+                        torch.zeros(3, dtype=dreal),
+                        self.a))
         for i, ci in enumerate(_a):
             if i == 4:
                 out += -4 * ci * z**4 * torch.log(z)
@@ -258,7 +264,9 @@ class AdSBHNet(nn.Module):
 
     def eval_df(self, z):
         out = torch.zeros_like(z)
-        _a = torch.cat((torch.tensor([1.0], dtype=dreal), self.a))
+        _a = torch.cat((torch.tensor([1.0], dtype=dreal),
+                        torch.zeros(3, dtype=dreal),
+                        self.a))
         for i, ci in enumerate(_a):
             out += -4 * ci * z**i
         out += 4 * self.eval_f(z)
@@ -267,21 +275,22 @@ class AdSBHNet(nn.Module):
         return out
 
     def eval_b(self, z):
-        z = z if isinstance(z, torch.Tensor) else torch.as_tensor(z)
+        z = torch.as_tensor(z, dtype=dcomplex)
         out = torch.zeros_like(z)
         _b = torch.cat((torch.tensor([1.0], dtype=dreal),
-                        self.b,
-                        self.a.sum().unsqueeze(-1) - self.b.sum()))
+                        torch.zeros(3, dtype=dreal),
+                        self.b))
         for i, ci in enumerate(_b):
             out += ci * z**i
         return out
 
     def eval_db(self, z):
-        z = z if isinstance(z, torch.Tensor) else torch.as_tensor(z)
+        z = torch.as_tensor(z, dtype=dcomplex)
         out = torch.zeros_like(z)
-        _b = torch.cat((self.b,
-                        self.a.sum().unsqueeze(-1) - self.b.sum()))
-        for i, ci in enumerate(_b):
+        _b = torch.cat((torch.tensor([1.0], dtype=dreal),
+                        torch.zeros(3, dtype=dreal),
+                        self.b))
+        for i, ci in enumerate(_b[1:]):
             out += (i + 1) * ci * z**i
         return out
 
