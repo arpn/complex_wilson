@@ -1,8 +1,6 @@
-import logging
 import torch
 import torch.nn as nn
 import numpy as np
-from numpy.random import random
 from scipy.interpolate import interp1d
 from constants import dreal, dcomplex
 
@@ -22,8 +20,8 @@ class AdSBHNet(nn.Module):
         correctly in the UV. `self.shift` holds that parameter.
         '''
         self.shift = nn.Parameter(torch.tensor(0.0, dtype=dreal))
-        self.curve_L = []
-        self.curvs_zs = []
+        self.curve_L = None
+        self.curvs_zs = None
 
     def check_positive_a(self):
         '''
@@ -58,24 +56,33 @@ class AdSBHNet(nn.Module):
 
     def forward(self, Ls):
         '''
-        Initial version with torch.trapz
-        instead of torchdiffeq.
+        Implements the map L -> V(L). If computation of V(L)
+        fails for some L, then V(L) = nan. This can happen if L is outside
+        the range of the complex zs-curve that can be computed, or if
+        Newton's method fails to find zs = zs(L).
         '''
-        V = torch.zeros_like(Ls, dtype=dcomplex)
-
+        # Check that a(z) > 0 and b(z) > 0.
         self.check_positive_a()
         self.check_positive_b()
-        self.find_curve(Ls.max().item())
+        self.find_curve(Ls.max())
+
+        V = torch.zeros_like(Ls, dtype=dcomplex)
         curve = interp1d(self.curve_L, self.curve_zs)
 
         for i, L in enumerate(Ls):
+            if L > self.curve_L[-1]:
+                V[i] = self.as_tensor(complex('nan'), dcomplex)
+                continue
             init = complex(curve(L.item()))
-            _zs = self.find_zs_newton(L, init)
-            # TODO: Verify that flipping possibly negative imaginary parts is always safe
-            zs = torch.complex(_zs.real, _zs.imag.abs())
-            assert zs.real > 0, f'Real part of zs is negative: {zs} for L = {L}'
-            V[i] = self.integrate_V(zs)
-            assert not torch.isnan(V[i])
+            try:
+                _zs = self.find_zs_newton(L, init)
+                zs = torch.complex(_zs.real, _zs.imag.abs())
+                # TODO: Verify that flipping possibly negative imaginary parts is always safe
+                assert zs.real > 0, f'Real part of zs is negative: {zs} for L = {L}'
+                V[i] = self.integrate_V(zs)
+                assert not torch.isnan(V[i])
+            except AssertionError:
+                V[i] = self.as_tensor(complex('nan'), dcomplex)
         return V
 
     def as_tensor(self, tensor, dtype):
@@ -88,38 +95,43 @@ class AdSBHNet(nn.Module):
         else:
             return torch.as_tensor(tensor, dtype=dtype)
 
-    def find_curve(self, L_high=1.0):
-        zs_max, L_max = self.get_L_max()
-        self.curve_L = [0.0, L_max.item()]
-        self.curve_zs = [complex(0.0, 0.0), zs_max.item()]
+    def find_curve(self, L_high):
+        '''
+        Builds the real L(zs) curve in the complex zs-plane.
+        '''
+        with torch.no_grad():
+            zs_max, L_max = self.get_L_max()
+            self.curve_L = [0.0, L_max.item()]
+            self.curve_zs = [complex(0.0, 0.0), zs_max.item()]
 
-        L_step_default = (L_high - L_max.item()) / 50
-        L_step = L_step_default
-        while True:
-            L = self.curve_L[-1] + L_step
-            if np.abs(self.curve_zs[-1].imag) < 1e-8:
-                init = self.curve_zs[-1] + 0.1j
-            else:
-                init = self.curve_zs[-1]
-            _zs = self.find_zs_newton(L, init)
-            zs = complex(_zs.real.item(), _zs.imag.abs().item() if L > L_max else 0.0)
-            if np.abs(zs - self.curve_zs[-1]) > 0.1:
-                L_step /= 2
-            else:
-                self.curve_zs.append(zs)
-                self.curve_L.append(L)
-                L_step = L_step_default
-            if self.curve_L[-1] > L_high:
-                break
+            L_step_default = (L_high - L_max.item()) / 50
+            L_step = L_step_default
+            while True:
+                L = self.curve_L[-1] + L_step
+                if np.abs(self.curve_zs[-1].imag) < 1e-8:
+                    init = self.curve_zs[-1] + 0.1j
+                else:
+                    init = self.curve_zs[-1]
+                try:
+                    _zs = self.find_zs_newton(L, init)
+                except AssertionError:
+                    '''
+                    Root finding no longer converged: this defines the maximum L
+                    that the model can process.
+                    '''
+                    break
+                zs = complex(_zs.real.item(), _zs.imag.abs().item() if L > L_max else 0.0)
+                if np.abs(zs - self.curve_zs[-1]) > 0.1:
+                    L_step /= 2
+                else:
+                    self.curve_zs.append(zs)
+                    self.curve_L.append(L)
+                    L_step = L_step_default
+                if self.curve_L[-1] > L_high:
+                    break
 
-<<<<<<< HEAD
-    def find_zs_newton(self, L, init, max_steps=25, retry=10):
+    def find_zs_newton(self, L, init, max_steps=50):
         init = self.as_tensor(init, dcomplex)
-=======
-    def find_zs_newton(self, L, init, max_steps=50, retry=10):
-        if not isinstance(init, torch.Tensor) or init.dtype != dcomplex:
-            init = torch.as_tensor(init, dtype=dcomplex)
->>>>>>> no_squaring
         zs = [init]
         _L = self.integrate_L(zs[-1])
         for i in range(max_steps):
@@ -128,17 +140,11 @@ class AdSBHNet(nn.Module):
             assert zs[-1].abs() < 100 and not torch.isnan(zs[-1]), f'Something wrong in Newton:\n\tzs = {[_zs.item() for _zs in zs]}\n\tL = {L}\n\t_L = {_L}\n\tdL = {dL}'
             _L = self.integrate_L(zs[-1])
             diff = torch.abs(_L - L)
-            if diff < 1e-8:
+            if diff < 1e-10:
                 return zs[-1]
-        if retry > 0:
-            rand_init = init + (0.2 * random() - 0.1) + 1.j * (0.2 * random() - 0.1)
-            # Im(rand_init) should be positive
-            rand_init = rand_init.real + 1j * rand_init.imag.abs()
-            logging.warning(f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}. Retrying with random init {rand_init:.5f}.')
-            return self.find_zs_newton(L, rand_init, retry=retry - 1)
         # Save the last complex path for debugging
         self.newton_zs = zs
-        assert retry > 0, f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}.'
+        raise AssertionError(f'Newton\'s method failed to converge in {max_steps} iterations for L = {L}\n\tzs = {zs[-1]}\n\tdiff = {diff}\n\tinit = {init}.')
 
     def get_L_max(self):
         '''
@@ -146,32 +152,29 @@ class AdSBHNet(nn.Module):
         zs is still real. This is the last point on the
         real axis along the real L curve.
         '''
-        zs_UV, zs_IR = 0.001, 0.999
-        dL_IR = self.integrate_dL(zs_IR).real
-        dL_UV = self.integrate_dL(zs_UV).real
-        assert dL_IR < 0 and dL_UV > 0
-        while zs_IR - zs_UV > 1e-8:
+        with torch.no_grad():
+            zs_UV, zs_IR = 0.001, 0.999
+            dL_IR = self.integrate_dL(zs_IR).real
+            dL_UV = self.integrate_dL(zs_UV).real
+            assert dL_IR < 0 and dL_UV > 0
+            while zs_IR - zs_UV > 1e-8:
+                zs_mid = (zs_UV + zs_IR) / 2
+                dL_mid = self.integrate_dL(zs_mid).real
+                if dL_mid < 0:
+                    zs_IR = zs_mid
+                else:
+                    zs_UV = zs_mid
             zs_mid = (zs_UV + zs_IR) / 2
-            dL_mid = self.integrate_dL(zs_mid).real
-            if dL_mid < 0:
-                zs_IR = zs_mid
-            else:
-                zs_UV = zs_mid
-        zs_mid = (zs_UV + zs_IR) / 2
-        L_max = self.integrate_L(zs_mid)
-        assert L_max.imag.abs() < 1e-8
-        return torch.tensor(zs_mid, dtype=dcomplex), L_max.real
+            L_max = self.integrate_L(zs_mid)
+            assert L_max.imag.abs() < 1e-8
+            return torch.tensor(zs_mid, dtype=dcomplex), L_max.real
 
     def integrate_L(self, zs):
         '''
         This computes the dimensionless combination T*L,
         where T = 1/(pi*z_h).
         '''
-<<<<<<< HEAD
         zs = self.as_tensor(zs, dcomplex)
-=======
-        zs = torch.as_tensor(zs, dtype=dcomplex)
->>>>>>> no_squaring
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         sqrtg = self.eval_g(z).sqrt()
@@ -194,11 +197,7 @@ class AdSBHNet(nn.Module):
         '''
         This computes the derivative of T*L w.r.t. z_*/z_h.
         '''
-<<<<<<< HEAD
         zs = self.as_tensor(zs, dcomplex)
-=======
-        zs = torch.as_tensor(zs, dtype=dcomplex)
->>>>>>> no_squaring
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         fs = self.eval_f(zs)
@@ -232,11 +231,7 @@ class AdSBHNet(nn.Module):
         This computes the connected contribution of V/T,
         where T = 1/(pi*z_h).
         '''
-<<<<<<< HEAD
         zs = self.as_tensor(zs, dcomplex)
-=======
-        zs = torch.as_tensor(zs, dtype=dcomplex)
->>>>>>> no_squaring
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         f = self.eval_f(z)
@@ -262,7 +257,7 @@ class AdSBHNet(nn.Module):
         This computes the disconnected contribution of V/T,
         where T = 1/(pi*z_h).
         '''
-        zs = torch.as_tensor(zs, dtype=dcomplex)
+        zs = self.as_tensor(zs, dcomplex)
         # Coordinate is y = (1 - z) / (1 - zs)
         y = torch.linspace(0.001, 1, steps=1000, dtype=dreal)
         z = 1 - (1 - zs) * y
@@ -277,12 +272,7 @@ class AdSBHNet(nn.Module):
         return V
 
     def eval_f(self, z):
-<<<<<<< HEAD
-        z = z if isinstance(z, torch.Tensor) else torch.as_tensor(z)
         z = self.as_tensor(z, dcomplex)
-=======
-        z = torch.as_tensor(z, dtype=dcomplex)
->>>>>>> no_squaring
         out = torch.zeros_like(z)
         _a = torch.cat((torch.tensor([1.0], dtype=dreal),
                         torch.zeros(3, dtype=dreal),
@@ -295,6 +285,7 @@ class AdSBHNet(nn.Module):
         return out
 
     def eval_df(self, z):
+        z = self.as_tensor(z, dcomplex)
         out = torch.zeros_like(z)
         _a = torch.cat((torch.tensor([1.0], dtype=dreal),
                         torch.zeros(3, dtype=dreal),
@@ -306,8 +297,19 @@ class AdSBHNet(nn.Module):
         # TODO: add z->0 limit exactly
         return out
 
+    def eval_ddf(self, z):
+        z = self.as_tensor(z, dcomplex)
+        out = torch.zeros_like(z)
+        _a = torch.cat((torch.tensor([1.0], dtype=dreal),
+                        torch.zeros(3, dtype=dreal),
+                        self.a))
+        for i, ci in enumerate(_a[1:]):
+            out += (i + 1) * ci * z**i
+        out = 3 * self.eval_df(z) / z - 4 * out / z
+        return out
+
     def eval_b(self, z):
-        z = torch.as_tensor(z, dtype=dcomplex)
+        z = self.as_tensor(z, dcomplex)
         out = torch.zeros_like(z)
         _b = torch.cat((torch.tensor([1.0], dtype=dreal),
                         torch.zeros(3, dtype=dreal),
@@ -317,7 +319,7 @@ class AdSBHNet(nn.Module):
         return out
 
     def eval_db(self, z):
-        z = torch.as_tensor(z, dtype=dcomplex)
+        z = self.as_tensor(z, dcomplex)
         out = torch.zeros_like(z)
         _b = torch.cat((torch.tensor([1.0], dtype=dreal),
                         torch.zeros(3, dtype=dreal),
