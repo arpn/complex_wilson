@@ -47,6 +47,16 @@ class AdSBHNet(nn.Module):
             assert not torch.isnan(V[i])
         return V
 
+    def as_tensor(self, tensor, dtype):
+        '''
+        Converts `tensor` to a torch.tensor if it
+        is not already a tensor.
+        '''
+        if isinstance(tensor, torch.Tensor) and tensor.dtype == dtype:
+            return tensor
+        else:
+            return torch.as_tensor(tensor, dtype=dtype)
+
     def find_curve(self, L_high=1.0):
         zs_max, L_max = self.get_L_max()
         self.curve_L = [0.0, L_max.item()]
@@ -72,8 +82,7 @@ class AdSBHNet(nn.Module):
                 break
 
     def find_zs_newton(self, L, init, max_steps=25, retry=10):
-        if not isinstance(init, torch.Tensor) or init.dtype != dcomplex:
-            init = torch.as_tensor(init, dtype=dcomplex)
+        init = self.as_tensor(init, dcomplex)
         zs = [init]
         _L = self.integrate_L(zs[-1])
         for i in range(max_steps):
@@ -117,8 +126,7 @@ class AdSBHNet(nn.Module):
         This computes the dimensionless combination T*L,
         where T = 1/(pi*z_h).
         '''
-        zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
-            zs, dtype=dcomplex)
+        zs = self.as_tensor(zs, dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         sqrtg = self.eval_g(z).sqrt()
@@ -141,8 +149,7 @@ class AdSBHNet(nn.Module):
         '''
         This computes the derivative of T*L w.r.t. z_*/z_h.
         '''
-        zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
-            zs, dtype=dcomplex)
+        zs = self.as_tensor(zs, dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         fs = self.eval_f(zs)
@@ -177,8 +184,7 @@ class AdSBHNet(nn.Module):
         This computes the connected contribution of V/T,
         where T = 1/(pi*z_h).
         '''
-        zs = zs if isinstance(zs, torch.Tensor) else torch.as_tensor(
-            zs, dtype=dcomplex)
+        zs = self.as_tensor(zs, dcomplex)
         y = torch.linspace(0.001, 0.999, steps=1000, dtype=dreal)
         z = zs * (1 - y) * (1 + y)
         f = self.eval_f(z)
@@ -221,6 +227,7 @@ class AdSBHNet(nn.Module):
 
     def eval_f(self, z):
         z = z if isinstance(z, torch.Tensor) else torch.as_tensor(z)
+        z = self.as_tensor(z, dcomplex)
         out = torch.zeros_like(z)
         _a = torch.cat((torch.tensor([1.0], dtype=dreal), self.a))
         for i, ci in enumerate(_a):
